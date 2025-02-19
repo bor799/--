@@ -1,0 +1,275 @@
+// ==UserScript==
+// @name         小宇宙FM音频下载器
+// @namespace    http://tampermonkey.net/
+// @version      1.1
+// @description  为小宇宙FM添加MP3音频下载功能，支持进度显示和格式验证
+// @author       Zane
+// @match        https://www.xiaoyuzhoufm.com/episode/*
+// @grant        GM_download
+// @grant        GM_xmlhttpRequest
+// @license      MIT
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // 添加下载按钮的样式
+    const style = document.createElement('style');
+    style.textContent = `
+        .xiaoyuzhou-download-btn {
+            background-color: #1890ff;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 10px;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            transition: all 0.3s ease;
+        }
+        .xiaoyuzhou-download-btn:hover {
+            background-color: #40a9ff;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .xiaoyuzhou-download-btn.searching {
+            background-color: #f0f0f0;
+            color: #666;
+            cursor: default;
+        }
+        .xiaoyuzhou-download-btn.error {
+            background-color: #ff4d4f;
+        }
+        .xiaoyuzhou-download-btn i {
+            font-size: 16px;
+        }
+        .xiaoyuzhou-download-status {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 20px;
+            background: #1890ff;
+            color: white;
+            border-radius: 8px;
+            z-index: 9999;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            animation: slideIn 0.3s ease;
+        }
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+    `;
+    document.head.appendChild(style);
+
+    // 主函数
+    function init() {
+        console.log('初始化小宇宙FM下载器...');
+
+        // 避免重复添加按钮
+        const existingButton = document.querySelector('.xiaoyuzhou-download-btn');
+        if (existingButton) {
+            existingButton.remove();
+        }
+
+        // 创建状态显示按钮
+        const statusButton = document.createElement('button');
+        statusButton.className = 'xiaoyuzhou-download-btn searching';
+        statusButton.innerHTML = `
+            <i>🔍</i>
+            <span>正在查找音频...</span>
+        `;
+
+        // 插入到标题下方
+        const title = document.querySelector('.jsx-399326063.title') ||
+                     document.querySelector('.episode-title');
+        if (title) {
+            title.parentNode.insertBefore(statusButton, title.nextSibling);
+        }
+
+        let attempts = 0;
+        const maxAttempts = 5;
+
+        const checkInterval = setInterval(() => {
+            attempts++;
+            statusButton.innerHTML = `
+                <i>🔍</i>
+                <span>正在查找音频...${attempts}/${maxAttempts}</span>
+            `;
+
+            const audioElement = document.querySelector('audio');
+
+            if (audioElement) {
+                clearInterval(checkInterval);
+                statusButton.innerHTML = `
+                    <i>⬇️</i>
+                    <span>下载MP3音频</span>
+                `;
+                statusButton.style.backgroundColor = '#1890ff';
+                statusButton.style.color = 'white';
+                statusButton.style.cursor = 'pointer';
+                statusButton.classList.remove('searching');
+
+                statusButton.addEventListener('click', () => {
+                    if (audioElement.src) {
+                        downloadAudio(audioElement.src);
+                    } else {
+                        const audioUrl = findAudioUrlFromPage();
+                        if (audioUrl) {
+                            downloadAudio(audioUrl);
+                        } else {
+                            showNotification('未能找到音频文件，请确保音频已开始播放', 'error');
+                        }
+                    }
+                });
+            }
+
+            if (attempts >= maxAttempts) {
+                clearInterval(checkInterval);
+                statusButton.innerHTML = `
+                    <i>⚠️</i>
+                    <span>未找到音频，请先播放</span>
+                `;
+                statusButton.classList.add('error');
+            }
+        }, 1000);
+    }
+
+    // 显示通知
+    function showNotification(message, type = 'info') {
+        const notification = document.createElement('div');
+        notification.className = 'xiaoyuzhou-download-status';
+        notification.style.backgroundColor = type === 'error' ? '#ff4d4f' : '#1890ff';
+        notification.innerHTML = `
+            <i>${type === 'error' ? '⚠️' : 'ℹ️'}</i>
+            <span>${message}</span>
+        `;
+        document.body.appendChild(notification);
+
+        setTimeout(() => {
+            notification.style.animation = 'slideIn 0.3s ease reverse';
+            setTimeout(() => document.body.removeChild(notification), 300);
+        }, 3000);
+    }
+
+    // 从页面数据中查找音频URL
+    function findAudioUrlFromPage() {
+        const scripts = document.getElementsByTagName('script');
+        for (const script of scripts) {
+            const content = script.textContent;
+            if (content && content.includes('audioUrl')) {
+                const match = content.match(/"audioUrl":"([^"]+)"/);
+                if (match && match[1]) {
+                    return match[1];
+                }
+            }
+        }
+        return null;
+    }
+
+    // 下载音频文件
+    function downloadAudio(audioUrl) {
+        if (!audioUrl) {
+            showNotification('未找到音频文件', 'error');
+            return;
+        }
+
+        // 检查音频URL的格式
+        if (!audioUrl.includes('.mp3')) {
+            console.log('音频链接不是MP3格式:', audioUrl);
+            showNotification('当前音频不是MP3格式，无法下载', 'error');
+            return;
+        }
+
+        // 获取播客标题作为文件名
+        const title = document.querySelector('.episode-title')?.textContent ||
+                     document.title ||
+                     '小宇宙FM音频';
+        const fileName = `${title}.mp3`.replace(/[\\/:*?"<>|]/g, '_');
+
+        // 显示下载状态
+        const downloadStatus = document.createElement('div');
+        downloadStatus.className = 'xiaoyuzhou-download-status';
+        downloadStatus.innerHTML = `
+            <i>⏬</i>
+            <span>正在下载MP3...0%</span>
+        `;
+        document.body.appendChild(downloadStatus);
+
+        // 使用GM_xmlhttpRequest下载文件
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: audioUrl,
+            responseType: 'blob',
+            headers: {
+                'Accept': 'audio/mpeg',
+            },
+            onprogress: (progress) => {
+                if (progress.total) {
+                    const percent = Math.round((progress.loaded / progress.total) * 100);
+                    downloadStatus.innerHTML = `
+                        <i>⏬</i>
+                        <span>正在下载MP3...${percent}%</span>
+                    `;
+                }
+            },
+            onload: (response) => {
+                const contentType = response.response.type;
+                if (!contentType.includes('audio/mpeg') && !contentType.includes('audio/mp3')) {
+                    showNotification('下载失败：文件格式不是MP3', 'error');
+                    document.body.removeChild(downloadStatus);
+                    return;
+                }
+
+                const blob = new Blob([response.response], { type: 'audio/mpeg' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = fileName;
+                document.body.appendChild(a);
+                a.click();
+
+                setTimeout(() => {
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    document.body.removeChild(downloadStatus);
+                    showNotification('MP3下载完成！');
+                }, 1000);
+
+                console.log('MP3下载完成');
+            },
+            onerror: (error) => {
+                console.error('下载失败:', error);
+                showNotification('下载失败，请重试', 'error');
+                document.body.removeChild(downloadStatus);
+            }
+        });
+    }
+
+    // 监听URL变化，支持SPA
+    let lastUrl = location.href;
+    new MutationObserver(() => {
+        const url = location.href;
+        if (url !== lastUrl) {
+            lastUrl = url;
+            if (url.includes('xiaoyuzhoufm.com/episode/')) {
+                init();
+            }
+        }
+    }).observe(document, {subtree: true, childList: true});
+
+    // 初始化
+    init();
+})();
